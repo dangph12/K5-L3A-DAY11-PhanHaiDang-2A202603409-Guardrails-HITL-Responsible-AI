@@ -28,7 +28,7 @@ from core.utils import chat_with_agent
 # ============================================================
 
 def content_filter(response: str) -> dict:
-    """Filter response for PII, secrets, and harmful content.
+    """Filter response for PII and secrets.
 
     Args:
         response: The LLM's response text
@@ -41,19 +41,20 @@ def content_filter(response: str) -> dict:
 
     # PII patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "password": (
+            r"\bpassword\b(?:\s*[:=]\s*|\s+is\s+|\s+(?=[^\s,;]*\d))"
+            r'''(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;"']+)'''
+        ),
+        "api_key": r"\bsk-[a-zA-Z0-9_-]+",
+        "email": r"[\w.%+-]+@[\w.-]+\.[a-zA-Z]{2,}\b",
+        "vn_phone": r"(?<![\w+])(?:0|\+84[ .-]?)(?:[ .-]?\d){9,10}(?!\w)",
+        "national_id": r"\b(?:\d{9}|\d{12})\b",
     }
 
     for name, pattern in PII_PATTERNS.items():
-        matches = re.findall(pattern, response, re.IGNORECASE)
-        if matches:
-            issues.append(f"{name}: {len(matches)} found")
-            redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
+        redacted, count = re.subn(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
+        if count:
+            issues.append(f"{name}: {count} found")
 
     return {
         "safe": len(issues) == 0,
@@ -154,7 +155,7 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         """Extract text from LLM response."""
         text = ""
         if hasattr(llm_response, "content") and llm_response.content:
-            for part in llm_response.content.parts:
+            for part in llm_response.content.parts or []:
                 if hasattr(part, "text") and part.text:
                     text += part.text
         return text
@@ -170,18 +171,18 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
 
         response_text = self._extract_text(llm_response)
         if not response_text:
-            return llm_response
+            return None
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        result = content_filter(response_text)
+        if result["safe"]:
+            return None
 
-        return llm_response  # TODO: modify if needed
+        self.redacted_count += 1
+        llm_response.content = types.Content(
+            role=llm_response.content.role,
+            parts=[types.Part.from_text(text=result["redacted"])],
+        )
+        return llm_response
 
 
 # ============================================================
